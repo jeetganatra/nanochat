@@ -4,6 +4,7 @@ import logging
 import urllib.request
 import torch
 import torch.distributed as dist
+from filelock import FileLock
 
 
 class ColoredFormatter(logging.Formatter):
