@@ -126,7 +126,7 @@ def is_ddp_initialized() -> bool:
     return dist.is_available() and dist.is_initialized()
 
 def get_dist_info():
-    if is_ddp_initialized():
+    if is_ddp_requested():
         assert all(var in os.environ for var in ['RANK', 'LOCAL_RANK', 'WORLD_SIZE'])
         ddp_rank = int(os.environ['RANK'])
         ddp_local_rank = int(os.environ['LOCAL_RANK'])
