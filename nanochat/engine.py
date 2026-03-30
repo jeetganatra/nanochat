@@ -139,7 +139,7 @@ class KVCache:
         
 
 # -----------------------------------------------------------------------------
-@torch.inference_mode
+@torch.inference_mode()
 def sample_next_token(logits, rng, temperature=1.0, top_k=None):
     """Sample a single next token from given logits of shape (B, vocab_size). Returns (B, 1)."""
     assert temperature >= 0.0, "temperature must be non-negative"
@@ -176,7 +176,7 @@ class Engine:
         self.model = model
         self.tokenizer = tokenizer
 
-    @torch.inference_mode
+    @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
