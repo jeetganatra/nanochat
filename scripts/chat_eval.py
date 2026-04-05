@@ -34,6 +34,8 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
 
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
 
+    # Run the evaluation
+    num_passed, total = 0, 0
     for i in range(ddp_rank, num_problems, ddp_world_size):
         conversation = task_object[i]
 
