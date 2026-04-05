@@ -33,6 +33,7 @@ Abuse Prevention:
 import argparse
 import json
 import os
+import time
 import torch
 import asyncio
 import logging
@@ -245,13 +246,10 @@ app.add_middleware(
 @app.get("/")
 async def root():
     """Serve the chat UI."""
-    ui_html_path = os.path.join("nanochat", "ui.html")
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ui_html_path = os.path.join(base_dir, "chat-ui", "index.html")
     with open(ui_html_path, "r", encoding="utf-8") as f:
         html_content = f.read()
-    html_content = html_content.replace(
-        "const API_URL = `http://${window.location.hostname}:8000`;",
-        "const API_URL = '';"
-    )
     return HTMLResponse(content=html_content)
 
 
@@ -297,19 +295,47 @@ async def generate_stream(
     max_new_tokens=None,
     top_k=None
 ) -> AsyncGenerator[str, None]:
-    """Generate assistant response with streaming."""
+    """Generate assistant response with streaming, with structured tool call events."""
     temperature = temperature if temperature is not None else args.temperature
     max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
     top_k = top_k if top_k is not None else args.top_k
 
     bos = worker.tokenizer.get_bos_token_id()
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+    python_start = worker.tokenizer.encode_special("<|python_start|>")
+    python_end = worker.tokenizer.encode_special("<|python_end|>")
+    output_start = worker.tokenizer.encode_special("<|output_start|>")
+    output_end = worker.tokenizer.encode_special("<|output_end|>")
 
-    # Accumulate tokens
+    def sse(data):
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    # Text accumulation (existing UTF-8 logic)
     accumulated_tokens = []
-
-    # Track the last complete UTF-8 string (without replacement characters)
     last_clean_text = ""
+
+    # Tool call state machine
+    state = "normal"  # normal | python_expr | awaiting_output | python_output
+    expr_tokens = []
+    result_tokens = []
+
+    # Timing metrics
+    t_start = time.perf_counter()
+    ttft = None
+    total_tokens = 0
+
+    def flush_text():
+        """Emit any pending accumulated text tokens."""
+        nonlocal last_clean_text
+        if not accumulated_tokens:
+            return None
+        current_text = worker.tokenizer.decode(accumulated_tokens)
+        if not current_text.endswith('\ufffd'):
+            new_text = current_text[len(last_clean_text):]
+            if new_text:
+                last_clean_text = current_text
+                return sse({'token': new_text, 'gpu': worker.gpu_id})
+        return None
 
     with worker.autocast_ctx:
         for token_column, token_masks in worker.engine.generate(
@@ -322,23 +348,67 @@ async def generate_stream(
         ):
             token = token_column[0]
 
-            if token==assistant_end or token == bos:
+            if token == assistant_end or token == bos:
                 break
 
-            # Append the token to sequence
-            accumulated_tokens.append(token)
-            # Decode all accumulated tokens to get proper UTF-8 handling
-            current_text = worker.tokenizer.decode(accumulated_tokens)
-            # Only emit text if it doesn't end with a replacement character
-            # This ensures we don't emit incomplete UTF-8 sequences
-            if not current_text.endswith('�'):
-                # Extract only the new text since last clean decode
-                new_text = current_text[len(last_clean_text):]
-                if new_text:  # Only yield if there's new content
-                    yield f"data: {json.dumps({'token': new_text, 'gpu': worker.gpu_id}, ensure_ascii=False)}\n\n"
-                    last_clean_text = current_text
+            total_tokens += 1
 
-    yield f"data: {json.dumps({'done': True})}\n\n"
+            # Handle awaiting_output: if the next token isn't output_start,
+            # the calculator returned None — emit error and process token normally
+            if state == "awaiting_output":
+                if token == output_start:
+                    state = "python_output"
+                    result_tokens = []
+                    continue
+                else:
+                    yield sse({"type": "tool_result", "tool": "python", "result": None, "error": "no result"})
+                    state = "normal"
+                    # fall through to process this token normally
+
+            if token == python_start and state == "normal":
+                chunk = flush_text()
+                if chunk:
+                    yield chunk
+                state = "python_expr"
+                expr_tokens = []
+                yield sse({"type": "tool_start", "tool": "python"})
+
+            elif token == python_end and state == "python_expr":
+                expr_text = worker.tokenizer.decode(expr_tokens)
+                yield sse({"type": "tool_call", "tool": "python", "expression": expr_text})
+                state = "awaiting_output"
+
+            elif token == output_end and state == "python_output":
+                result_text = worker.tokenizer.decode(result_tokens)
+                yield sse({"type": "tool_result", "tool": "python", "result": result_text})
+                state = "normal"
+
+            elif state == "python_expr":
+                expr_tokens.append(token)
+
+            elif state == "python_output":
+                result_tokens.append(token)
+
+            else:
+                # Normal text token
+                if ttft is None:
+                    ttft = time.perf_counter()
+                accumulated_tokens.append(token)
+                current_text = worker.tokenizer.decode(accumulated_tokens)
+                if not current_text.endswith('\ufffd'):
+                    new_text = current_text[len(last_clean_text):]
+                    if new_text:
+                        yield sse({'token': new_text, 'gpu': worker.gpu_id})
+                        last_clean_text = current_text
+
+    # Emit any remaining buffered text
+    chunk = flush_text()
+    if chunk:
+        yield chunk
+
+    elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+    ttft_ms = round((ttft - t_start) * 1000) if ttft else None
+    yield sse({"done": True, "metrics": {"total_tokens": total_tokens, "elapsed_ms": elapsed_ms, "ttft_ms": ttft_ms}})
 
 @app.post("/chat/completions")
 async def chat_completions(request: ChatRequest):
