@@ -50,6 +50,8 @@ from nanochat.common import compute_init, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Abuse prevention limits
 MAX_MESSAGES_PER_REQUEST = 500
 MAX_MESSAGE_LENGTH = 8000
@@ -246,17 +248,20 @@ app.add_middleware(
 @app.get("/")
 async def root():
     """Serve the chat UI."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ui_html_path = os.path.join(base_dir, "chat-ui", "index.html")
+    ui_html_path = os.path.join(BASE_DIR, "chat-ui", "index.html")
     with open(ui_html_path, "r", encoding="utf-8") as f:
         html_content = f.read()
+    html_content = html_content.replace(
+        "const API_BASE = 'http://localhost:8888'",
+        "const API_BASE = ''"
+    )
     return HTMLResponse(content=html_content)
 
 
 @app.get("/logo.svg")
 async def logo():
     """Serve the NanoChat logo for favicon and header."""
-    logo_path = os.path.join("nanochat", "logo.svg")
+    logo_path = os.path.join(BASE_DIR, "nanochat", "logo.svg")
     return FileResponse(logo_path, media_type="image/svg+xml")
 
 
